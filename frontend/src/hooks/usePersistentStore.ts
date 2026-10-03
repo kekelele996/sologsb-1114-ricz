@@ -2,10 +2,11 @@ import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
 import type { Cave, Segment, Sketch, Station } from '@/types'
-import { computeHorizontal, computeVertical } from '@/utils/survey'
+import { computeHorizontal, computeVertical, round } from '@/utils/survey'
+import { backfillDatum, cumulativeVerticalOf } from '@/utils/datum'
 
 /** IndexedDB 数据结构版本号（升级迁移时使用） */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -30,7 +31,7 @@ class CaveSurveyDb extends Dexie {
       meta: 'key'
     })
     // v2：旧版测点记录缺少水平距/垂距，迁移时由斜距 + 倾角补齐
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         caves: 'id, name, region, archived',
         segments: 'id, caveId, code, type',
@@ -49,6 +50,57 @@ class CaveSurveyDb extends Dexie {
             if (!Number.isFinite(station.verticalDistance)) {
               station.verticalDistance = computeVertical(station.dip, station.slopeDistance)
             }
+          })
+      })
+    // v3：洞口台账（点名 / 接测水准点）与洞段基准对账。
+    // 旧洞段没有接测基准，按当时洞口海拔回填；回填不上的单列（unbackfilled）等确认。
+    this.version(SCHEMA_VERSION)
+      .stores({
+        caves: 'id, name, region, archived, entranceCode, datumBenchmark',
+        segments: 'id, caveId, code, type, entranceCode, datumStatus',
+        stations: 'id, segmentId, code, date',
+        sketches: 'id, segmentId, code, mergeOrder',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        const caveTable = tx.table<Cave, string>('caves')
+        const stationTable = tx.table<Station, string>('stations')
+
+        const caves = await caveTable.toArray()
+        // 登记室侧：补齐洞口点名 / 接测水准点字段
+        const caveByName = new Map<string, Cave>()
+        await caveTable.toCollection().modify((cave) => {
+          if (!cave.entranceCode) {
+            cave.entranceCode = `RK-${String(caves.findIndex((item) => item.id === cave.id) + 1).padStart(2, '0')}`
+          }
+          if (cave.datumBenchmark === undefined) cave.datumBenchmark = ''
+          if (cave.benchmarkAltitude === undefined) cave.benchmarkAltitude = null
+          caveByName.set(cave.id, cave)
+        })
+
+        // 测量小组侧：旧洞段回填基准；同一升级事务里顺手用读数补累计垂距
+        const stations = await stationTable.toArray()
+        await tx
+          .table<Segment, string>('segments')
+          .toCollection()
+          .modify((segment) => {
+            if (segment.datumStatus !== undefined) return
+            const cave = caveByName.get(segment.caveId) ?? null
+            const vertical = cumulativeVerticalOf(
+              stations.filter((station) => station.segmentId === segment.id)
+            )
+            if (!segment.entranceCode) {
+              segment.entranceCode = cave?.entranceCode ?? ''
+            }
+            const filled = backfillDatum(segment, cave, vertical)
+            segment.datumStatus = filled.datumStatus
+            segment.datumBenchmark = filled.datumBenchmark
+            segment.datumEntranceAltitude = filled.datumEntranceAltitude
+            segment.cumulativeVertical = filled.cumulativeVertical
+            segment.datumNote = filled.datumNote
+            segment.resultAltitude = filled.resultAltitude
+            segment.datumLevelDelta = null
+            segment.datumConfirmedAt = null
           })
       })
   }
@@ -109,6 +161,7 @@ export async function seedDemoData(): Promise<void> {
 
   const today = new Date().toISOString().slice(0, 10)
 
+  // 洞口台账（登记室保管）：洞口点名 RK-01，已接测水准点 BM-青山-07
   await db.caves.put({
     id: caveId,
     name: '青龙背斜溶洞',
@@ -116,6 +169,9 @@ export async function seedDemoData(): Promise<void> {
     longitude: 107.2136,
     latitude: 25.8123,
     altitude: 986.4,
+    entranceCode: 'RK-01',
+    datumBenchmark: 'BM-青山-07',
+    benchmarkAltitude: 987.5,
     layer: '二叠系下统栖霞组灰岩',
     knownLength: 1240,
     startDate: today,
@@ -125,36 +181,7 @@ export async function seedDemoData(): Promise<void> {
     createdAt: new Date().toISOString()
   })
 
-  await db.segments.bulkPut([
-    {
-      id: segmentA,
-      caveId,
-      code: 'C-01',
-      startStake: 'K0+000',
-      endStake: 'K0+120',
-      type: '廊道',
-      avgWidth: 2.4,
-      avgHeight: 3.1,
-      slopeTrend: '缓升 3°',
-      closed: false,
-      sketchNo: 'S-01'
-    },
-    {
-      id: segmentB,
-      caveId,
-      code: 'C-02',
-      startStake: 'K0+120',
-      endStake: 'K0+195',
-      type: '竖井',
-      avgWidth: 1.6,
-      avgHeight: 12.5,
-      slopeTrend: '陡降 68°',
-      closed: true,
-      sketchNo: 'S-02'
-    }
-  ])
-
-  await db.stations.bulkPut([
+  const stationRows: Station[] = [
     {
       id: 'st_demo_001',
       segmentId: segmentA,
@@ -185,7 +212,62 @@ export async function seedDemoData(): Promise<void> {
       isClosurePoint: true,
       note: '本段末站，已与 C-02 起点核对'
     }
+  ]
+
+  const verticalA = round(
+    stationRows.reduce((sum, station) => sum + station.verticalDistance, 0),
+    3
+  )
+  // 登记室接测高差 986.4 − 987.5 = -1.1 m，C-01 累计垂距与之相符 → 已认基准
+  await db.segments.bulkPut([
+    {
+      id: segmentA,
+      caveId,
+      code: 'C-01',
+      startStake: 'K0+000',
+      endStake: 'K0+120',
+      type: '廊道',
+      avgWidth: 2.4,
+      avgHeight: 3.1,
+      slopeTrend: '缓降 2°',
+      closed: false,
+      sketchNo: 'S-01',
+      entranceCode: 'RK-01',
+      datumLevelDelta: -1.1,
+      cumulativeVertical: verticalA,
+      datumStatus: 'confirmed',
+      datumBenchmark: 'BM-青山-07',
+      datumEntranceAltitude: 986.4,
+      datumNote: '洞口「RK-01」接测高差与累计垂距相符，已按水准点「BM-青山-07」认基准',
+      datumConfirmedAt: new Date().toISOString(),
+      resultAltitude: round(986.4 + verticalA, 3)
+    },
+    {
+      // C-02 尚未录入读数，累计垂距缺失 → 对账时应挂待核
+      id: segmentB,
+      caveId,
+      code: 'C-02',
+      startStake: 'K0+120',
+      endStake: 'K0+195',
+      type: '竖井',
+      avgWidth: 1.6,
+      avgHeight: 12.5,
+      slopeTrend: '陡降 68°',
+      closed: true,
+      sketchNo: 'S-02',
+      entranceCode: 'RK-01',
+      datumLevelDelta: -1.1,
+      cumulativeVertical: null,
+      datumStatus: 'pending',
+      datumBenchmark: '',
+      datumEntranceAltitude: 986.4,
+      datumNote: '尚无测点读数，累计垂距缺失，挂账待核',
+      datumConfirmedAt: null,
+      resultAltitude: null
+    }
   ])
+
+  await db.stations.bulkPut(stationRows)
 
   await db.sketches.bulkPut([
     {

@@ -4,6 +4,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Station } from '@/types'
 import BearingInput from '@/components/common/BearingInput.vue'
 import ClosureBadge from '@/components/common/ClosureBadge.vue'
+import DatumTag from '@/components/common/DatumTag.vue'
 import SegmentTag from '@/components/common/SegmentTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { useClosureCheck } from '@/hooks/useClosureCheck'
@@ -210,6 +211,10 @@ async function removeStation(station: Station): Promise<void> {
         />
       </el-select>
       <SegmentTag v-if="currentSegment" :type="currentSegment.type" :closed="currentSegment.closed" size="small" />
+      <DatumTag v-if="currentSegment && currentSegment.datumStatus !== 'confirmed'" :status="currentSegment.datumStatus" />
+      <span v-if="currentSegment && currentSegment.datumStatus === 'stale'" class="muted datum-hint">
+        洞口基准已变更：现场读数原样保留，洞段成果请到「洞段编目」按新基准高程重算
+      </span>
       <el-button :disabled="!selectedSegmentId" @click="refreshDefaultCode">重算下一桩号</el-button>
     </div>
 
@@ -352,6 +357,9 @@ async function removeStation(station: Station): Promise<void> {
 }
 .alert {
   margin-bottom: 12px;
+}
+.datum-hint {
+  font-size: 12px;
 }
 :deep(.abnormal-row) {
   background: #fdf2f2 !important;

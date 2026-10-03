@@ -2,7 +2,8 @@
 import { computed, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Cave } from '@/types'
-import { segmentLength } from '@/types'
+import { DATUM_STATUS_LABELS, segmentLength } from '@/types'
+import DatumTag from '@/components/common/DatumTag.vue'
 import { useStore } from '@/hooks/usePersistentStore'
 import { caveStore } from '@/stores/caveStore'
 import { segmentStore } from '@/stores/segmentStore'
@@ -23,6 +24,9 @@ const form = reactive({
   longitude: 0,
   latitude: 0,
   altitude: 0,
+  entranceCode: '',
+  datumBenchmark: '',
+  benchmarkAltitude: null as number | null,
   layer: '',
   knownLength: 0,
   startDate: new Date().toISOString().slice(0, 10),
@@ -52,12 +56,29 @@ function lastSurveyDate(caveId: string): string {
   return dates.sort()[dates.length - 1]
 }
 
+/** 该洞口下各基准状态洞段数（只列数量 > 0 的状态） */
+function datumCounts(caveId: string): { status: keyof typeof DATUM_STATUS_LABELS; count: number }[] {
+  const segments = segmentsOf(caveId)
+  return (['confirmed', 'stale', 'pending', 'unbackfilled'] as const)
+    .map((status) => ({ status, count: segments.filter((segment) => segment.datumStatus === status).length }))
+    .filter((item) => item.count > 0)
+}
+
+/** 登记室接测高差 = 洞口海拔 − 水准点海拔 */
+function levelDelta(cave: Cave): number | null {
+  if (cave.benchmarkAltitude === null) return null
+  return Math.round((cave.altitude - cave.benchmarkAltitude) * 1000) / 1000
+}
+
 function resetForm(): void {
   form.name = ''
   form.region = ''
   form.longitude = 0
   form.latitude = 0
   form.altitude = 0
+  form.entranceCode = ''
+  form.datumBenchmark = ''
+  form.benchmarkAltitude = null
   form.layer = ''
   form.knownLength = 0
   form.startDate = new Date().toISOString().slice(0, 10)
@@ -68,6 +89,7 @@ function resetForm(): void {
 
 function openCreate(): void {
   resetForm()
+  form.entranceCode = `RK-${String(caveState.caves.length + 1).padStart(2, '0')}`
   dialogVisible.value = true
 }
 
@@ -78,6 +100,9 @@ function openEdit(cave: Cave): void {
   form.longitude = cave.longitude
   form.latitude = cave.latitude
   form.altitude = cave.altitude
+  form.entranceCode = cave.entranceCode
+  form.datumBenchmark = cave.datumBenchmark
+  form.benchmarkAltitude = cave.benchmarkAltitude
   form.layer = cave.layer
   form.knownLength = cave.knownLength
   form.startDate = cave.startDate
@@ -91,6 +116,10 @@ async function submit(): Promise<void> {
     ElMessage.warning('请填写洞穴名')
     return
   }
+  if (!form.entranceCode.trim()) {
+    ElMessage.warning('请填写洞口点名（与测量小组对账的键）')
+    return
+  }
   const existing = caveState.caves.find((item) => item.id === editingId.value)
   const cave: Cave = {
     id: existing?.id ?? uid('cave'),
@@ -99,6 +128,12 @@ async function submit(): Promise<void> {
     longitude: Number(form.longitude) || 0,
     latitude: Number(form.latitude) || 0,
     altitude: Number(form.altitude) || 0,
+    entranceCode: form.entranceCode.trim(),
+    datumBenchmark: form.datumBenchmark.trim(),
+    benchmarkAltitude:
+      form.benchmarkAltitude === null || Number.isNaN(Number(form.benchmarkAltitude))
+        ? null
+        : Number(form.benchmarkAltitude),
     layer: form.layer.trim(),
     knownLength: Number(form.knownLength) || 0,
     startDate: form.startDate,
@@ -107,9 +142,12 @@ async function submit(): Promise<void> {
     archived: existing?.archived ?? false,
     createdAt: existing?.createdAt ?? new Date().toISOString()
   }
-  await caveStore.getState().save(cave)
+  const result = await caveStore.getState().save(cave)
   dialogVisible.value = false
   ElMessage.success(existing ? '洞穴信息已更新' : '洞穴已建立')
+  if (result.invalidated > 0) {
+    ElMessage.warning(`洞口海拔 / 接测点已变更，${result.invalidated} 个旧基准洞段已挑出等待高程重算（现场读数原样保留）`)
+  }
 }
 
 async function toggleArchive(cave: Cave): Promise<void> {
@@ -176,10 +214,31 @@ async function removeCave(cave: Cave): Promise<void> {
           </div>
         </div>
         <el-descriptions :column="1" size="small" border class="desc">
+          <el-descriptions-item label="洞口点名">
+            <span class="mono">{{ cave.entranceCode || '—' }}</span>
+            <span v-if="levelDelta(cave) !== null" class="muted">
+              ｜接测高差 {{ levelDelta(cave) }} m
+            </span>
+          </el-descriptions-item>
           <el-descriptions-item label="经纬度">
             {{ cave.longitude.toFixed(4) }}, {{ cave.latitude.toFixed(4) }}
           </el-descriptions-item>
           <el-descriptions-item label="海拔">{{ cave.altitude }} m</el-descriptions-item>
+          <el-descriptions-item label="接测水准点">
+            <span class="mono">{{ cave.datumBenchmark || '尚未接测' }}</span>
+            <span v-if="cave.benchmarkAltitude !== null" class="muted">（{{ cave.benchmarkAltitude }} m）</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="洞段基准">
+            <template v-if="segmentsOf(cave.id).length > 0">
+              <DatumTag
+                v-for="item in datumCounts(cave.id)"
+                :key="item.status"
+                :status="item.status"
+                :count="item.count"
+              />
+            </template>
+            <span v-else class="muted">暂无洞段</span>
+          </el-descriptions-item>
           <el-descriptions-item label="发育层位">{{ cave.layer || '—' }}</el-descriptions-item>
           <el-descriptions-item label="测绘负责人">{{ cave.surveyor || '—' }}</el-descriptions-item>
           <el-descriptions-item label="洞内温湿度">{{ cave.climateNote || '—' }}</el-descriptions-item>
@@ -205,22 +264,53 @@ async function removeCave(cave: Cave): Promise<void> {
           <el-input v-model="form.region" placeholder="如 黔南州 · 平塘县" />
         </el-form-item>
         <el-row :gutter="12">
-          <el-col :span="8">
+          <el-col :span="6">
             <el-form-item label="经度">
               <el-input-number v-model="form.longitude" :precision="4" :step="0.0001" :controls="false" style="width: 100%" />
             </el-form-item>
           </el-col>
-          <el-col :span="8">
+          <el-col :span="6">
             <el-form-item label="纬度">
               <el-input-number v-model="form.latitude" :precision="4" :step="0.0001" :controls="false" style="width: 100%" />
             </el-form-item>
           </el-col>
-          <el-col :span="8">
-            <el-form-item label="海拔(m)">
+          <el-col :span="6">
+            <el-form-item label="海拔(m)" required>
               <el-input-number v-model="form.altitude" :precision="1" :controls="false" style="width: 100%" />
             </el-form-item>
           </el-col>
+          <el-col :span="6">
+            <el-form-item label="洞口点名" required>
+              <el-input v-model="form.entranceCode" placeholder="如 RK-01" />
+            </el-form-item>
+          </el-col>
         </el-row>
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="接测水准点">
+              <el-input v-model="form.datumBenchmark" placeholder="如 BM-青山-07，留空表示尚未接测" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="水准点海拔(m)">
+              <el-input-number
+                v-model="form.benchmarkAltitude"
+                :precision="3"
+                :controls="false"
+                placeholder="未接测可留空"
+                style="width: 100%"
+              />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-alert
+          v-if="editingId"
+          type="warning"
+          :closable="false"
+          show-icon
+          title="修改洞口海拔或接测水准点后，该洞口下已认基准的洞段会被挑出挂「待高程重算」，现场读数原样保留。"
+          style="margin-bottom: 12px"
+        />
         <el-form-item label="发育层位">
           <el-input v-model="form.layer" placeholder="如 二叠系下统栖霞组灰岩" />
         </el-form-item>

@@ -1,4 +1,4 @@
-/** Cave 洞穴：作为洞段、测点、草图的归属根节点 */
+/** Cave 洞穴：作为洞段、测点、草图的归属根节点（普查登记室保管的洞口台账） */
 export interface Cave {
   id: string
   /** 洞穴名 */
@@ -9,8 +9,14 @@ export interface Cave {
   longitude: number
   /** 纬度 */
   latitude: number
-  /** 海拔（米） */
+  /** 洞口海拔（米） */
   altitude: number
+  /** 洞口点名：与测量小组对账的唯一键，如 RK01 */
+  entranceCode: string
+  /** 接测水准点点名（登记室的接测结论），空串表示尚未接测 */
+  datumBenchmark: string
+  /** 接测水准点海拔（米），null 表示尚未接测、给不出接测高差 */
+  benchmarkAltitude: number | null
   /** 发育层位 */
   layer: string
   /** 已知总长（米） */
