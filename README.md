@@ -61,13 +61,14 @@ sologsb-1114/
 │   ├── nginx.conf              # try_files 前端路由回落 + gzip
 │   ├── public/favicon.svg
 │   └── src/
-│       ├── types/              # cave.ts / segment.ts / station.ts / sketch.ts / index.ts
-│       ├── stores/             # caveStore / segmentStore / stationStore / sketchStore（Zustand）
+│       ├── types/              # cave.ts / segment.ts / station.ts / sketch.ts / datum.ts / index.ts
+│       ├── stores/             # caveStore / segmentStore / stationStore / sketchStore / datumStore（Zustand）
 │       ├── components/common/  # SegmentTag / BearingInput / ClosureBadge / GridCanvas
 │       ├── hooks/              # usePersistentStore / useClosureCheck
-│       ├── pages/              # CavesPage / SegmentsPage / StationsPage / SketchPage / MergePage
+│       ├── pages/datum/     # BenchmarkPanel / EntrancePanel / ElevationPanel / UnconfirmedPanel
+│       ├── pages/              # CavesPage / SegmentsPage / StationsPage / DatumPage / SketchPage / MergePage
 │       ├── router/index.ts
-│       └── utils/              # survey.ts / export.ts / id.ts
+│       └── utils/              # survey.ts / datum.ts / export.ts / id.ts
 ```
 
 ## 五、数据模型与存储
@@ -78,10 +79,22 @@ sologsb-1114/
 | Segment 洞段 | 起止桩号、类型（竖井/廊道/厅堂/裂隙/水道）、平均宽高、是否闭合 | `segments` |
 | Station 测点 | 方位角、倾角、斜距 → 自动推算水平距/垂距，累计闭合差 | `stations` |
 | Sketch 草图 | 格数、比例、绘制人、拼合顺序号、桩号对齐锚点 | `sketches` |
+| Benchmark 水准点 | 普查登记室保管：点名、等级、高程、认定结论（已认定/待核/已注销） | `benchmarks` |
+| Entrance 洞口资料 | 登记室保管：洞口点名（两摊对账唯一键）、经纬度、海拔、接测水准点、接测高差、基准版本号 | `entrances` |
+| SegmentElevation 洞段成果 | 测量小组保管：洞口点名、累计垂距、终点高程、认定基准快照、状态机 | `elevations` |
 
 - 数据库名 `gbcavesurvey`，`meta` 表保存 `schemaVersion`；
 - `version(2)` 升级迁移会把旧版测点记录由「斜距 + 倾角」补齐 `horizontalDistance` / `verticalDistance`；
+- `version(3)` 升级迁移把「洞口资料 / 洞内成果」拆成两摊：每个洞穴生成一份洞口资料，每个洞段生成一条高程成果；旧洞段没有接测基准，**按当时的洞口海拔回填**，回填不上（洞口资料缺失或无测点读数）的单列进「回填待确认」队列等人工指认；
 - 数据仅存于浏览器本地，容器无状态、不挂载命名卷，清除浏览器数据即清空。
+
+### 高程基准两摊分管与对账
+
+- **登记室一摊**（`benchmarks` + `entrances`）：管洞口经纬度、海拔、接测的水准点与接测高差；洞口海拔或接测点一经改动，洞口的 `datumVersion` 自增，**只把旧版本上「已认基准」的洞段成果挑为待重算**（旧基准快照保留可回溯，现场测点读数原样不动）；
+- **测量组一摊**（`elevations`）：管各洞段的洞口点名、测点累计垂距与洞段成果；
+- **对账**：两摊按洞口点名对账——洞口查无、未接测 / 水准点结论未定（待核、注销）、接测高差与累计垂距相差超过容差（默认 0.1 m）的洞段先挂「待核」，基准归属由登记室的水准点结论决定；
+- **只重试这一个洞段**：单段对账失败只重挂该段，已经按新基准认过的洞段不跟着回退；「批量对账」也只处理待提交 / 待核 / 待重算，已认基准与回填待确认的跳过；
+- 终点高程 = 洞口海拔 + 累计垂距（垂距下降为负），认定时留存基准快照（洞口海拔、水准点、接测高差、基准版本、认定时间）。
 
 ## 六、主要页面
 
@@ -90,6 +103,7 @@ sologsb-1114/
 | `/caves` | 洞穴清单：卡片展示实测/已知总长、洞段数、最近测量日期，支持新建、编辑、归档、删除（删除前校验下级洞段数） |
 | `/segments` | 洞段编目表：按桩号区间/类型/洞穴筛选，批量调整洞段类型与闭合标记，自动累计总长 |
 | `/stations` | 测点读数录入：方位角/倾角专用输入（度分秒 ⇄ 十进制度），自动推算水平距垂距，实时闭合差徽标，异常读数整行高亮，支持连续录入下一站 |
+| `/datum` | 高程基准对账台：登记室维护洞口资料/水准点结论，测量组登记洞段成果；按洞口点名对账，基准变更自动挑出待重算，旧数据升级回填单列待确认 |
 | `/sketch` | 草图工作台：坐标纸网格上绘制测点折线、标注桩号与倾角箭头，支持草图基准方位旋转与草图记录管理 |
 | `/merge` | 图幅拼合视图：拖动图幅按相邻边缘吸附、按桩号锚点一键对齐，输出可调整的拼合顺序表并支持 CSV 导出 |
 

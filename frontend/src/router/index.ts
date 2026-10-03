@@ -21,6 +21,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '测点读数' }
   },
   {
+    path: '/datum',
+    name: 'datum',
+    component: () => import('@/pages/DatumPage.vue'),
+    meta: { title: '高程基准对账' }
+  },
+  {
     path: '/sketch',
     name: 'sketch',
     component: () => import('@/pages/SketchPage.vue'),

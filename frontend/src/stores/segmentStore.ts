@@ -1,6 +1,7 @@
 import { createStore } from 'zustand/vanilla'
 import type { Segment, SegmentType } from '@/types'
 import { db, syncAll, syncDelete, syncPut } from '@/hooks/usePersistentStore'
+import { datumStore } from '@/stores/datumStore'
 
 export interface SegmentState {
   segments: Segment[]
@@ -27,6 +28,8 @@ export const segmentStore = createStore<SegmentState>((set, get) => ({
   },
   remove: async (id) => {
     await syncDelete<Segment>(db.segments, id)
+    // 洞内成果随洞段一并删除；测点读数由 StationsPage 侧先行校验清理
+    await datumStore.getState().removeElevationsBySegment(id)
     await get().hydrate()
   },
   removeByCave: async (caveId) => {
@@ -34,6 +37,7 @@ export const segmentStore = createStore<SegmentState>((set, get) => ({
       .segments.filter((item) => item.caveId === caveId)
       .map((item) => item.id)
     await db.segments.bulkDelete(ids)
+    await datumStore.getState().removeElevationsByCave(caveId)
     await get().hydrate()
   },
   bulkSetType: async (ids, type) => {
